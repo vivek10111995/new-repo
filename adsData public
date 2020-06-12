@@ -1,0 +1,752 @@
+var mongoose = require("mongoose"),
+    async = require("async"),
+    _ = require("lodash"),
+    config = require("../../../config/config"),
+    translation = require("../../libs/translation"),
+    permLib = require("../../libs/permission"),
+    responder = require("../../libs/responder"),
+    utility = require("../../libs/utility"),
+    requestParser = require("../../libs/requestParser"),
+    validationErrors = require("../../libs/validationErrors"),
+    sortables = ["name", "code", "createdAt", "updatedAt"],
+    defaultSortColumn = "createdAt",
+    Twitter = require("twitter");
+
+module.exports = function (req, res, next) {
+    var limit = parseInt(req.body.limit) || 1000,
+        skip = parseInt(req.body.skip) || 0,
+        sortBy = req.body.sortBy || "createdAt",
+        sort = req.body.sort || "desc",
+        filter = req.body.filter || {};
+
+    if (sortables.indexOf(sortBy) < 0) {
+        sortBy = defaultSortColumn;
+    }
+
+    if (sort != "desc") {
+        sort = "asc";
+    }
+    var whereDevice = {
+        isDeleted: false,
+        _id: req.body.device
+    };
+    var where = {
+        isDeleted: false
+    };
+    var dataList = new Array();
+    mongoose.models.Device.findOne(whereDevice).exec(function (err, item) {
+        if (err) {
+            return responder.handleInternalError(res, err, next);
+        }
+
+        if (!item) {
+            return responder.bad(res, {
+                errors: [
+                    {
+                        msg: translation.translate(
+                            res,
+                            "Please enter valid device ID."
+                        ),
+                        code: "Please enter valid device ID.",
+                        param: null
+                    }
+                ]
+            });
+        } else {
+            mongoose.models.Ads.find(where).exec(function (err, results) {
+                if (err) {
+                    return responder.handleInternalError(res, err, next);
+                } else {
+                    results.forEach(element => {
+                        element.devices.forEach(deviceData => {
+                            if (deviceData == req.body.device) {
+                                dataList.push(element._id);
+                            }
+                        });
+                    });
+                    var where = {
+                        isDeleted: false,
+                        _id: {
+                            $in: dataList
+                        }
+                    };
+                    let waitForThirdPartyResp = {
+                        twitter: false,
+                        weather: false
+                    };
+                    // mongoose.set("debug", true);
+                    mongoose.models.DeviceAdsOrder.find({
+                        device: mongoose.Types.ObjectId(req.body.device),
+
+                        isDeleted: false
+                    }).exec(function (error, itemOrder) {
+                        if (error) {
+                            return responder.handleInternalError(
+                                res,
+                                error,
+                                next
+                            );
+                        }
+                        if (!itemOrder) {
+                            return responder.handleInternalError(
+                                res,
+                                error,
+                                next
+                            );
+                        } else {
+                            let addorder = [];
+                            itemOrder.forEach(item => {
+                                addorder[item.ad] = item.order;
+                            });
+                            mongoose.models.Ads.aggregate([
+                                {
+                                    $match: where
+                                },
+                                // {
+                                //     $lookup: {
+                                //         from:
+                                //             mongoose.models.DeviceAdsOrder.collection
+                                //                 .name,
+                                //         foreignField: "ad",
+                                //         localField: "_id",
+                                //         as: "adOrder"
+                                //     }
+                                // },
+                                // {
+                                //     $unwind: {
+                                //         path: "$adOrder",
+                                //         preserveNullAndEmptyArrays: true
+                                //     }
+                                // },
+                                {
+                                    $lookup: {
+                                        from:
+                                            mongoose.models.Playlist.collection
+                                                .name,
+                                        foreignField: "_id",
+                                        localField: "playlists.playlist",
+                                        as: "playlist"
+                                    }
+                                },
+                                {
+                                    $unwind: {
+                                        path: "$playlist",
+                                        preserveNullAndEmptyArrays: false
+                                    }
+                                },
+                                {
+                                    $lookup: {
+                                        from:
+                                            mongoose.models.AdType.collection
+                                                .name,
+                                        foreignField: "_id",
+                                        localField: "adType",
+                                        as: "adType"
+                                    }
+                                },
+                                {
+                                    $unwind: {
+                                        path: "$adType",
+                                        preserveNullAndEmptyArrays: false
+                                    }
+                                },
+                                {
+                                    $lookup: {
+                                        from:
+                                            mongoose.models.Content.collection
+                                                .name,
+                                        foreignField: "_id",
+                                        localField: "playlist.contents.content",
+                                        as: "content"
+                                    }
+                                },
+                                {
+                                    $unwind: {
+                                        path: "$content",
+                                        preserveNullAndEmptyArrays: false
+                                    }
+                                },
+                                {
+                                    $lookup: {
+                                        from:
+                                            mongoose.models.ContentType
+                                                .collection.name,
+                                        foreignField: "_id",
+                                        localField: "content.contentType",
+                                        as: "contentType"
+                                    }
+                                },
+                                {
+                                    $unwind: {
+                                        path: "$contentType",
+                                        preserveNullAndEmptyArrays: false
+                                    }
+                                },
+                                {
+                                    $lookup: {
+                                        from:
+                                            mongoose.models.User.collection
+                                                .name,
+                                        foreignField: "_id",
+                                        localField: "client",
+                                        as: "client"
+                                    }
+                                },
+                                {
+                                    $unwind: {
+                                        path: "$client",
+                                        preserveNullAndEmptyArrays: false
+                                    }
+                                },
+
+                                {
+                                    $group: {
+                                        _id: null,
+                                        count: {
+                                            $sum: 1
+                                        },
+                                        data: {
+                                            $push: "$$ROOT"
+                                        }
+                                    }
+                                },
+                                {
+                                    $project: {
+                                        count: 1,
+                                        list: {
+                                            $slice: ["$data", skip, limit]
+                                        }
+                                    }
+                                },
+                                {
+                                    $project: {
+                                        count: 1,
+                                        "list._id": 1,
+                                        "list.name": 1,
+                                        "list.previewQr": 1,
+                                        "list.deviceQr": 1,
+                                        "list.description": 1,
+                                        "list.duration": 1,
+                                        "list.playlists": 1,
+                                        "list.url": 1,
+                                        "list.textToScroll": 1,
+                                        "list.scanText": 1,
+                                        // "list.device._id": 1,
+                                        // "list.device.name": 1,
+                                        "list.isDeleted": 1,
+                                        // "list.adOrder.order": 1,
+
+                                        "list.client._id": 1,
+                                        "list.client.name": 1,
+                                        "list.client.settings.thirdPartyConfig": 1,
+                                        "list.playlist._id": 1,
+                                        "list.playlist.name": 1,
+                                        "list.playlist.contents": 1,
+                                        "list.playlist.order": 1,
+                                        "list.playlist.playlistData": 1,
+                                        "list.content._id": 1,
+                                        "list.content.name": 1,
+                                        "list.content.moderatorStatus": 1,
+                                        "list.content.contentData": 1,
+                                        "list.content.duration": 1,
+                                        "list.content.order": 1,
+                                        "list.content.version": 1,
+                                        "list.contentType._id": 1,
+                                        "list.contentType.name": 1,
+                                        "list.contentType.code": 1,
+                                        "list.adType._id": 1,
+                                        "list.adType.name": 1,
+                                        "list.adType.code": 1,
+                                        "list.isActive": 1,
+                                        "list.createdAt": 1,
+                                        "list.updatedAt": 1
+                                    }
+                                }
+                            ]).exec(async function (err, results) {
+                                if (err) {
+                                    return responder.handleInternalError(
+                                        res,
+                                        err,
+                                        next
+                                    );
+                                } else if (results.length == 0) {
+                                    return responder.success(res, {
+                                        count: 0,
+                                        listdata: []
+                                    });
+                                } else {
+                                    let data = [];
+                                    results[0].list.forEach(item => {
+                                        if (
+                                            item.content.moderatorStatus ==
+                                            "approved"
+                                        ) {
+                                            var itemData = {
+                                                ad_id: item._id,
+                                                ad_name: item.name,
+                                                ad_order:
+                                                    addorder[item._id] || 0,
+                                                adType_id: item.adType._id,
+                                                adType_name: item.adType.name,
+                                                adType_code: item.adType.code,
+                                                ad_client: item.client._id,
+                                                ad_client_name:
+                                                    item.client.name,
+                                                ad_description:
+                                                    item.description,
+                                                ad_textToScroll:
+                                                    item.textToScroll,
+                                                ad_scanText: item.scanText,
+                                                ad_createdAt: item.createdAt,
+                                                ad_updatedAt: item.updatedAt,
+                                                ad_isDeleted: item.isDeleted,
+                                                playlist_id: item.playlist._id,
+                                                playlist_name:
+                                                    item.playlist.name,
+                                                playlist_order:
+                                                    item.playlist.order,
+                                                playlistData: item.playlist.playlistData,
+                                                content_id: item.content._id,
+                                                content_name: item.content.name,
+                                                content_order:
+                                                    item.content.order,
+                                                content_duration:
+                                                    item.content.duration,
+                                                content_version:
+                                                    item.content.version,
+                                                // content_contentData: item.content.contentData,
+                                                contentType_id:
+                                                    item.contentType._id,
+                                                contentType_name:
+                                                    item.contentType.name,
+                                                contentType_code:
+                                                    item.contentType.code
+                                            };
+                                        }
+                                        let qrPreviewQr = {};
+                                        let qrDeviceQr = {};
+
+                                        // getOrder(req.body.device, item)
+                                        //     .then(async orderData => {
+                                        //         itemData.ad_order = orderData;
+                                        //         // waitForThirdPartyResp.weather = false;
+                                        //         // sendResp();
+                                        //     })
+                                        //     .catch(err => {});
+
+                                        if (
+                                            item.content.moderatorStatus ==
+                                            "approved"
+                                        ) {
+                                            if (
+                                                item.previewQr &&
+                                                item.previewQr != undefined &&
+                                                item.previewQr.default !=
+                                                undefined
+                                            ) {
+                                                qrPreviewQr = {
+                                                    default:
+                                                        config.clientUrl +
+                                                        "/uploads/" +
+                                                        item.previewQr.default,
+                                                    small:
+                                                        config.clientUrl +
+                                                        "/uploads/" +
+                                                        item.previewQr.small,
+                                                    medium:
+                                                        config.clientUrl +
+                                                        "/uploads/" +
+                                                        item.previewQr.medium,
+                                                    large:
+                                                        config.clientUrl +
+                                                        "/uploads/" +
+                                                        item.previewQr.large
+                                                };
+                                                itemData.ads_previewQr = qrPreviewQr;
+                                            } else {
+                                                itemData.ads_previewQr = {};
+                                            }
+                                        }
+                                        if (
+                                            item.content.moderatorStatus ==
+                                            "approved"
+                                        ) {
+                                            if (
+                                                item.deviceQr &&
+                                                item.deviceQr.length > 0
+                                            ) {
+                                                cnt = 0;
+                                                item.deviceQr.forEach(
+                                                    element => {
+                                                        if (
+                                                            element.device ==
+                                                            req.body.device
+                                                        ) {
+                                                            var qr_url =
+                                                                config.clientUrl +
+                                                                "/api/public/device-content/qrvisits/" +
+                                                                item._id +
+                                                                "/" +
+                                                                req.body.device;
+                                                            qrDeviceQr = {
+                                                                text: qr_url,
+                                                                default:
+                                                                    config.clientUrl +
+                                                                    "/uploads/" +
+                                                                    item
+                                                                        .deviceQr[
+                                                                        cnt
+                                                                    ].qrcode
+                                                                        .default,
+                                                                small:
+                                                                    config.clientUrl +
+                                                                    "/uploads/" +
+                                                                    item
+                                                                        .deviceQr[
+                                                                        cnt
+                                                                    ].qrcode
+                                                                        .small,
+                                                                medium:
+                                                                    config.clientUrl +
+                                                                    "/uploads/" +
+                                                                    item
+                                                                        .deviceQr[
+                                                                        cnt
+                                                                    ].qrcode
+                                                                        .medium,
+                                                                large:
+                                                                    config.clientUrl +
+                                                                    "/uploads/" +
+                                                                    item
+                                                                        .deviceQr[
+                                                                        cnt
+                                                                    ].qrcode
+                                                                        .large
+                                                            };
+                                                            itemData.ads_deviceQr = qrDeviceQr;
+                                                            itemData.ads;
+                                                        }
+                                                        cnt++;
+                                                    }
+                                                );
+                                            } else {
+                                                itemData.ads_deviceQr = {};
+                                            }
+
+                                            if (
+                                                item.contentType.code == "text"
+                                            ) {
+                                                itemData.contentData = {
+                                                    textData:
+                                                        item.content.contentData
+                                                            .text
+                                                };
+                                            } else if (
+                                                item.contentType.code == "image"
+                                            ) {
+                                                itemData.contentData = {
+                                                    imageData: {
+                                                        small:
+                                                            config.clientUrl +
+                                                            "/uploads/" +
+                                                            item.content
+                                                                .contentData
+                                                                .image.file
+                                                                .small,
+                                                        medium:
+                                                            config.clientUrl +
+                                                            "/uploads/" +
+                                                            item.content
+                                                                .contentData
+                                                                .image.file
+                                                                .medium,
+                                                        large:
+                                                            config.clientUrl +
+                                                            "/uploads/" +
+                                                            item.content
+                                                                .contentData
+                                                                .image.file
+                                                                .large
+                                                    }
+                                                };
+                                            } else if (
+                                                item.contentType.code == "video"
+                                            ) {
+                                                itemData.contentData = {
+                                                    videoData: {
+                                                        video:
+                                                            config.clientUrl +
+                                                            "/uploads/" +
+                                                            item.content
+                                                                .contentData
+                                                                .video.file,
+                                                        duration:
+                                                            item.content
+                                                                .duration
+                                                    }
+                                                };
+                                            } else if (
+                                                item.contentType.code ==
+                                                "youtube"
+                                            ) {
+                                                itemData.contentData = {
+                                                    youtubeData: {
+                                                        video:
+                                                            "https://www.youtube.com/watch?v=" +
+                                                            item.content
+                                                                .contentData
+                                                                .youtube
+                                                                .videoID,
+                                                        duration:
+                                                            item.content
+                                                                .duration
+                                                    }
+                                                };
+                                            } else if (
+                                                item.contentType.code ==
+                                                "facebook"
+                                            ) {
+                                                itemData.contentData = {
+                                                    facebookData:
+                                                        item.content.contentData
+                                                            .facebook
+                                                };
+                                            } else if (
+                                                item.contentType.code ==
+                                                "weather"
+                                            ) {
+                                                waitForThirdPartyResp.weather = true;
+
+                                                if (
+                                                    item.content.contentData
+                                                        .weather &&
+                                                    item.content.contentData
+                                                        .weather.city
+                                                ) {
+                                                    if (item.client.settings && item.client.settings.thirdPartyConfig && item.client.settings.thirdPartyConfig.weather && item.client.settings.thirdPartyConfig.weather.owm_api_key != {}) {
+
+                                                        getWeather(
+                                                            item.client.settings
+                                                                .thirdPartyConfig
+                                                                .weather
+                                                                .owm_api_key,
+                                                            item.content.contentData
+                                                                .weather,
+                                                            req
+                                                        )
+                                                            .then(
+                                                                async weatherData => {
+                                                                    itemData.contentData = {
+                                                                        weatherData: weatherData
+                                                                    };
+                                                                    waitForThirdPartyResp.weather = false;
+                                                                    sendResp();
+                                                                }
+                                                            )
+                                                            .catch(err => { });
+                                                    } else {
+                                                        itemData.contentData = {}
+                                                        waitForThirdPartyResp.weather = false;
+                                                        sendResp();
+                                                    }
+                                                }
+                                            } else if (
+                                                item.contentType.code ==
+                                                "twitter"
+                                            ) {
+                                                waitForThirdPartyResp.twitter = true;
+                                                if (
+                                                    item.content.contentData
+                                                        .twitter &&
+                                                    item.content.contentData
+                                                        .twitter.name
+                                                ) {
+                                                    if (item.client.settings && item.client.settings.thirdPartyConfig && item.client.settings.thirdPartyConfig.twitter != {}) {
+
+                                                        getTwitterTimeLine(
+                                                            item.client.settings
+                                                                .thirdPartyConfig
+                                                                .twitter,
+                                                            item.content.contentData
+                                                                .twitter,
+                                                            req
+                                                        )
+                                                            .then(
+                                                                async twitterData => {
+                                                                    itemData.contentData = {
+                                                                        twitterData: twitterData
+                                                                    };
+                                                                    waitForThirdPartyResp.twitter = false;
+                                                                    sendResp();
+                                                                }
+                                                            )
+                                                            .catch(err => { });
+                                                    } else {
+                                                        itemData.contentData = {}
+                                                        waitForThirdPartyResp.twitter = false;
+                                                        sendResp();
+                                                    }
+                                                }
+                                            } else {
+                                                console.log("Item not found");
+                                            }
+                                        }
+                                        if (itemData) {
+                                            data.push(itemData);
+                                        }
+                                    });
+                                    if (
+                                        !waitForThirdPartyResp.twitter &&
+                                        !waitForThirdPartyResp.weather
+                                    ) {
+                                        sendResp();
+                                    }
+                                    function sendResp() {
+                                        if (
+                                            !waitForThirdPartyResp.twitter &&
+                                            !waitForThirdPartyResp.weather
+                                        ) {
+                                            data.sort((a, b) =>
+                                                a.ad_order > b.ad_order ? 1 : -1
+                                            );
+
+                                            data.forEach(element => {
+                                                if (element.contentData == undefined || element.contentData == "undefined") {
+                                                    element.contentData = {}
+                                                }
+                                            });
+
+                                            return responder.success(res, {
+                                                count: data.length,
+                                                listdata: data
+                                            });
+                                        }
+                                    }
+                                }
+                            });
+                        }
+                    });
+                }
+            });
+        }
+    });
+};
+async function getWeather(thirdPartyConfig, weather, req) {
+    var url,
+        err = "";
+    result = url;
+    result = await promisifiedRequest(weather, thirdPartyConfig);
+    return result;
+}
+
+const promisifiedRequest = async function (weather, thirdPartyConfig) {
+    var resultStr = "";
+    return await new Promise(async (resolve, reject) => {
+        await mongoose.models.City.findOne({
+            _id: weather.city,
+            isDeleted: false
+        })
+            .populate([
+                {
+                    path: "district",
+                    select: "name code"
+                }
+            ])
+            .exec(function (error, itemCity) {
+                if (error) {
+                    return reject(error);
+                } else {
+                    url =
+                        "http://api.openweathermap.org/data/2.5/weather?q=" +
+                        itemCity.name +
+                        ",IN" +
+                        "&apiKey=" +
+                        thirdPartyConfig +
+                        "&units=metric";
+
+                    var request = require("request");
+                    request.get(url, function (error, response, body) {
+                        if (error) {
+                            console.log(error);
+                        } else {
+                            let result = JSON.parse(body);
+                            resultStr =
+                                result.name + " " + result.main.temp + "°C";
+                            return resolve(resultStr);
+                        }
+                    });
+                }
+            });
+    });
+};
+
+/**Function to retrive user timeline from twitter*/
+async function getTwitterTimeLine(thirdPartyConfig, twiterContentData, req) {
+    result = [];
+    result = await promisifiedTwitterRequest(
+        twiterContentData,
+        thirdPartyConfig
+    );
+    return result;
+}
+
+const promisifiedTwitterRequest = async function (
+    twiterContentData,
+    thirdPartyConfig
+) {
+    return await new Promise(async (resolve, reject) => {
+        var twitterConfig = thirdPartyConfig;
+        var client = new Twitter({
+            consumer_key: twitterConfig.twitter_consumer_key,
+            consumer_secret: twitterConfig.twitter_consumer_secret,
+            access_token_key: twitterConfig.twitter_oauth_access_token,
+            access_token_secret: twitterConfig.twitter_oauth_access_token_secret
+        });
+
+        var params = { screen_name: twiterContentData.name };
+        client.get("statuses/user_timeline", params, function (
+            error,
+            tweets,
+            response
+        ) {
+            if (!error) {
+                let twitterData = "";
+                let seperator = "";
+                tweets.forEach(item => {
+                    if (twitterData != "") seperator = "<br />";
+                    twitterData = twitterData + seperator + item.text;
+                });
+                return resolve(twitterData);
+            } else {
+                return resolve(error);
+            }
+        });
+    });
+};
+async function getOrder(device, item) {
+    var result = 0;
+    result = await promisifiedRequestOrder(device, item);
+
+    return result;
+}
+
+const promisifiedRequestOrder = async function (device, item) {
+    return await new Promise(async (resolve, reject) => {
+        await mongoose.models.DeviceAdsOrder.findOne({
+            device: device,
+            ad: item._id,
+            isDeleted: false
+        }).exec(function (error, itemOrder) {
+            if (error) {
+                return reject(error);
+            }
+            if (!itemOrder) {
+                var order = 0;
+                return resolve(order);
+            } else {
+                return resolve(itemOrder.order);
+            }
+        });
+    });
+};
+
